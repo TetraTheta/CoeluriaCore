@@ -3,9 +3,39 @@ plugins {
   id 'dev.architectury.loom' version '1.14.476' apply false
   id 'architectury-plugin' version '3.5.166'
   id 'com.gradleup.shadow' version '9.4.2' apply false
-  id 'io.github.pacifistmc.forgix' version '2.0.0-SNAPSHOT.5.1'
+  id 'io.github.pacifistmc.forgix' version '2.0.0'
   id 'me.modmuss50.mod-publish-plugin' version '1.1.0'
 }
+
+def minecraftMatrix = new Properties()
+file('gradle/minecraft-versions.properties').withInputStream { minecraftMatrix.load(it) }
+
+ext.supported_minecraft_versions = minecraftMatrix.supported_targets.split(',').collect { it.trim() }
+def minecraftPropertiesByVersion = supported_minecraft_versions.collectEntries { minecraftVersion ->
+  def minecraftProperties = new Properties()
+  file("gradle/minecraft-versions/${minecraftVersion}.properties").withInputStream { minecraftProperties.load(it) }
+  [(minecraftVersion): minecraftProperties]
+}
+ext.enabled_minecraft_versions = supported_minecraft_versions.findAll { minecraftVersion ->
+  minecraftPropertiesByVersion[minecraftVersion].getProperty('enabled', 'true').toBoolean()
+}
+
+if (enabled_minecraft_versions.isEmpty()) {
+  throw new GradleException('At least one Minecraft target must be enabled.')
+}
+
+def requestedTargetMinecraft = findProperty('targetMinecraft')?.toString()?.replace('_', '.')
+ext.target_minecraft = requestedTargetMinecraft ?: (enabled_minecraft_versions.contains(minecraftMatrix.latest_target) ? minecraftMatrix.latest_target : enabled_minecraft_versions.last())
+
+if (!supported_minecraft_versions.contains(target_minecraft)) {
+  throw new GradleException("Unsupported Minecraft target '${target_minecraft}'. Supported targets: ${supported_minecraft_versions.join(', ')}")
+}
+if (!enabled_minecraft_versions.contains(target_minecraft)) {
+  throw new GradleException("Minecraft target '${target_minecraft}' is disabled. Set enabled=true in gradle/minecraft-versions/${target_minecraft}.properties to build it.")
+}
+
+def targetMinecraftProperties = minecraftPropertiesByVersion[target_minecraft]
+targetMinecraftProperties.each { key, value -> ext.set(key.toString(), value.toString()) }
 
 architectury {
   minecraft = rootProject.minecraft_version
@@ -20,6 +50,13 @@ forgix {
   autoRun = true
   silence = true
   archiveClassifier = ''
+
+  fabric {
+    inputJar = project(':fabric').tasks.remapJar.archiveFile
+  }
+  neoforge {
+    inputJar = project(':neoforge').tasks.remapJar.archiveFile
+  }
 }
 
 publishMods {
@@ -43,7 +80,7 @@ publishMods {
     clientRequired = true
     serverRequired = true
     requires('architectury-api')
-    javaVersions.add(JavaVersion.VERSION_21)
+    javaVersions.add(JavaVersion.toVersion(rootProject.java_version))
     minecraftVersions.add(rootProject.minecraft_version)
   }
 }
@@ -57,6 +94,63 @@ tasks.named('build').configure {
     delete new File(libsDir, "${rootProject.archives_name}-${project.version}.jar").absolutePath
     delete new File(libsDir, "${rootProject.archives_name}-common-${project.version}.jar").absolutePath
   }
+}
+
+tasks.register('collectBuiltJars', Copy) {
+  description = "Collect ${rootProject.minecraft_version} build outputs into one directory."
+  group = 'build'
+  dependsOn tasks.named('build')
+  dependsOn ':common:copyToRoot', ':fabric:copyToRoot', ':neoforge:copyToRoot', ':mergeJars'
+
+  from(rootProject.layout.buildDirectory.dir('libs')) {
+    include "${rootProject.archives_name}-fabric-${project.version}.jar"
+    include "${rootProject.archives_name}-neoforge-${project.version}.jar"
+  }
+  from(rootProject.layout.buildDirectory.dir('forgix')) {
+    include "${rootProject.archives_name}-${project.version}.jar"
+  }
+  into rootProject.layout.buildDirectory.dir("collected-jars/${rootProject.minecraft_version}")
+}
+
+def minecraftBuildTasks = []
+enabled_minecraft_versions.eachWithIndex { minecraftVersion, index ->
+  def taskName = "buildMinecraft${minecraftVersion.replace('.', '_')}"
+  def minecraftBuildTask = tasks.register(taskName, Exec) {
+    description = "Build and collect jars for Minecraft ${minecraftVersion}."
+    group = 'build'
+    workingDir = rootProject.projectDir
+    commandLine = [
+      System.getProperty('os.name').toLowerCase(Locale.ROOT).contains('windows') ? 'gradlew.bat' : './gradlew',
+      "-PtargetMinecraft=${minecraftVersion.replace('.', '_')}",
+      'build',
+      'collectBuiltJars'
+    ]
+  }
+
+  if (index > 0) {
+    minecraftBuildTask.configure {
+      mustRunAfter minecraftBuildTasks[index - 1]
+    }
+  }
+
+  minecraftBuildTasks.add(minecraftBuildTask)
+}
+
+tasks.register('buildAllMinecraftVersions') {
+  description = 'Build all supported Minecraft targets.'
+  group = 'build'
+  dependsOn minecraftBuildTasks
+}
+
+tasks.register('collectAllBuiltJars', Copy) {
+  description = 'Collect all Minecraft target jars into one flat directory.'
+  group = 'build'
+  dependsOn tasks.named('buildAllMinecraftVersions')
+
+  from(rootProject.layout.buildDirectory.dir('collected-jars')) {
+    include '*/*.jar'
+  }
+  into rootProject.layout.buildDirectory.dir('collected-jars/all')
 }
 
 // Delete 'build' directory at the root when running 'clean' task
@@ -99,12 +193,12 @@ subprojects {
     // If you remove this line, sources will not be generated.
     withSourcesJar()
 
-    sourceCompatibility = JavaVersion.VERSION_21
-    targetCompatibility = JavaVersion.VERSION_21
+    sourceCompatibility = JavaVersion.toVersion(rootProject.java_version)
+    targetCompatibility = JavaVersion.toVersion(rootProject.java_version)
   }
 
   tasks.withType(JavaCompile).configureEach {
-    it.options.release = 21
+    it.options.release = rootProject.java_version as Integer
   }
 
   // Configure Maven publishing.

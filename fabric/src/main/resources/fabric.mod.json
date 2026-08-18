@@ -26,9 +26,9 @@
     "coeluriacore.mixins.json"
   ],
   "depends": {
-    "fabricloader": ">=0.16.14",
-    "minecraft": "~1.21.7",
-    "java": ">=21",
-    "architectury": ">=17.0.6"
+    "fabricloader": ">=${fabric_loader_version}",
+    "minecraft": "~${minecraft_version}",
+    "java": ">=${java_version}",
+    "architectury": ">=${architectury_api_version}"
   }
 }
